@@ -1,0 +1,15 @@
+[package]
+name = "rusty-vnsync-server"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-trait = "0.1.68"
+ractor = { version = "0.7.5", features = ["cluster"] }
+simple-websockets = "0.1.5"
+statig = { version = "0.3.0", features = ["async"] }
+tokio = { version = "1.27.0", features = ["full"] }
+tokio-util = { version = "0.7.7", features = ["full"] }
+
