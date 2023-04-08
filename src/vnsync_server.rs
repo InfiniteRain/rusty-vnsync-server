@@ -1,14 +1,12 @@
-use crate::server_actor::{ServerActor, ServerMessage};
+use crate::actors::server_actor::{ServerActor, ServerMessage};
 use ractor::Actor;
 use simple_websockets::Event;
 
 pub async fn launch(port: u16) {
     let event_hub = simple_websockets::launch(port).expect("failed to launch on port 8080");
-    let (actor, handle) = Actor::spawn(None, ServerActor, ())
+    let (actor, _) = Actor::spawn(None, ServerActor, ())
         .await
         .expect("failed to start server actor");
-
-    tokio::spawn(handle);
 
     loop {
         actor
