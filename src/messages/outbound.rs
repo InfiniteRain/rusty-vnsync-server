@@ -17,6 +17,10 @@ pub enum InitType {
 pub enum ReplyData {
     #[serde(rename = "init")]
     Init(InitType),
+    #[serde(rename = "get_state_string")]
+    GetStateString { string: String },
+    #[serde(rename = "set_state_string")]
+    SetStateString,
 }
 
 #[derive(Debug, Serialize)]

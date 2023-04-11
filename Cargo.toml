@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 async-trait = "0.1.68"
+nanoid = "0.4.0"
 ractor = { version = "0.7.5", features = ["cluster"] }
 serde = { version = "1.0.159", features = ["derive"] }
 serde_json = "1.0.95"

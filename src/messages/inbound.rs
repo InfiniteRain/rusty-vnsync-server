@@ -16,6 +16,10 @@ pub enum InitMessage {
 pub enum MessageBody {
     #[serde(rename = "init")]
     Init(InitMessage),
+    #[serde(rename = "get_state_string")]
+    GetStateString,
+    #[serde(rename = "set_state_string")]
+    SetStateString { string: String },
 }
 
 #[derive(Debug, Deserialize)]

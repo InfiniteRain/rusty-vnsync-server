@@ -11,11 +11,12 @@ pub async fn launch(port: u16) {
     loop {
         actor
             .send_message(match event_hub.poll_async().await {
-                Event::Connect(client_id, responder) => {
-                    ServerMessage::Connect(client_id, responder)
-                }
-                Event::Disconnect(client_id) => ServerMessage::Disconnect(client_id),
-                Event::Message(client_id, message) => ServerMessage::Message(client_id, message),
+                Event::Connect(client_id, responder) => ServerMessage::Connect {
+                    client_id,
+                    responder,
+                },
+                Event::Disconnect(client_id) => ServerMessage::Disconnect { client_id },
+                Event::Message(client_id, message) => ServerMessage::Message { client_id, message },
             })
             .expect("failed to send a message to server actor");
     }
