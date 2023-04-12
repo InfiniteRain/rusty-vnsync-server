@@ -5,7 +5,9 @@ use crate::messages::{
 };
 use async_trait::async_trait;
 use nanoid::nanoid;
-use ractor::{concurrency::JoinHandle, Actor, ActorProcessingErr, ActorRef, Message, MessagingErr};
+use ractor::{
+    call, concurrency::JoinHandle, Actor, ActorProcessingErr, ActorRef, Message, MessagingErr,
+};
 use simple_websockets::Responder;
 use std::time::Duration;
 
@@ -33,18 +35,10 @@ pub enum FSM {
 
 #[derive(Debug)]
 pub enum ConnectionMessage {
-    StopConnection {
-        reason: ConnectionStopReason,
-    },
+    Stop { reason: ConnectionStopReason },
     InitTimeout,
     MalformedInboundMessageReceived,
-    InboundMessageReceived {
-        message: InboundMessage,
-    },
-    GetDanglingSessionResult {
-        session_state_option: Option<SessionState>,
-        message_id: String,
-    },
+    InboundMessageReceived { message: InboundMessage },
 }
 
 impl Message for ConnectionMessage {}
@@ -82,97 +76,118 @@ impl Actor for ConnectionActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match (&state.fsm, message) {
-            // WaitingForInitialization
+            // WaitingForInitialization; InboundMessageReceived (Init) (Host)
             (
                 FSM::WaitingForInitialization { timer_handle },
                 ConnectionMessage::InboundMessageReceived {
                     message:
                         InboundMessage {
                             id,
-                            body: MessageBody::Init(init_message),
+                            body: MessageBody::Init(InitMessage::Host),
                         },
                 },
             ) => {
                 timer_handle.abort();
 
-                match init_message {
-                    InitMessage::Host => {
-                        let session_id = nanoid!();
-                        let room_id = nanoid!();
+                let session_id = nanoid!();
+                let room_id = nanoid!();
 
-                        state.session_state = Some(SessionState {
-                            session_id: session_id.clone(),
-                            some_random_text: "None".into(),
-                        });
+                state.session_state = Some(SessionState {
+                    session_id: session_id.clone(),
+                    some_random_text: "None".into(),
+                });
 
-                        OutboundMessage::Reply {
-                            id: id.into(),
-                            data: ReplyData::Init(InitType::Host {
-                                session_id,
-                                room_id,
-                            }),
-                        }
-                        .send(&state.responder);
-                        state.fsm = FSM::Initialized;
-                    }
-                    InitMessage::Client { room_id: _ } => {
-                        let session_id = nanoid!();
+                state.fsm = FSM::Initialized;
 
-                        state.session_state = Some(SessionState {
-                            session_id: session_id.clone(),
-                            some_random_text: "None".into(),
-                        });
-
-                        OutboundMessage::Reply {
-                            id: id.into(),
-                            data: ReplyData::Init(InitType::Client { session_id }),
-                        }
-                        .send(&state.responder);
-                        state.fsm = FSM::Initialized;
-                    }
-                    InitMessage::Reconnect { session_id } => {
-                        state
-                            .server_actor
-                            .send_message(ServerMessage::GetDanglingSession {
-                                connection_actor: myself.into(),
-                                session_id,
-                                message_id: id.into(),
-                            })?;
-                    }
+                OutboundMessage::Reply {
+                    id: id.into(),
+                    data: ReplyData::Init(InitType::Host {
+                        session_id,
+                        room_id,
+                    }),
                 }
+                .send(&state.responder);
             }
-            (FSM::WaitingForInitialization { timer_handle: _ }, ConnectionMessage::InitTimeout) => {
-                myself.send_message(ConnectionMessage::StopConnection {
-                    reason: ConnectionStopReason::InitTimeout,
-                })?;
-            }
+
+            // WaitingForInitialization; InboundMessageReceived (Init) (Client)
             (
-                FSM::WaitingForInitialization { timer_handle: _ },
-                ConnectionMessage::GetDanglingSessionResult {
-                    session_state_option,
-                    message_id,
+                FSM::WaitingForInitialization { timer_handle },
+                ConnectionMessage::InboundMessageReceived {
+                    message:
+                        InboundMessage {
+                            id,
+                            body: MessageBody::Init(InitMessage::Client { room_id: _ }),
+                        },
                 },
             ) => {
-                match session_state_option {
-                    Some(session_state) => {
-                        state.session_state = Some(session_state);
+                timer_handle.abort();
+
+                let session_id = nanoid!();
+
+                state.session_state = Some(SessionState {
+                    session_id: session_id.clone(),
+                    some_random_text: "None".into(),
+                });
+
+                state.fsm = FSM::Initialized;
+
+                OutboundMessage::Reply {
+                    id: id.into(),
+                    data: ReplyData::Init(InitType::Client { session_id }),
+                }
+                .send(&state.responder);
+            }
+
+            // WaitingForInitialization; InboundMessageReceived (Init) (Reconnect)
+            (
+                FSM::WaitingForInitialization { timer_handle },
+                ConnectionMessage::InboundMessageReceived {
+                    message:
+                        InboundMessage {
+                            id,
+                            body: MessageBody::Init(InitMessage::Reconnect { session_id }),
+                        },
+                },
+            ) => {
+                timer_handle.abort();
+
+                let dangling_session_option = call!(state.server_actor, move |reply_port| {
+                    ServerMessage::GetDanglingSession {
+                        session_id,
+                        reply_port,
+                    }
+                })?;
+
+                match dangling_session_option {
+                    Some(dangling_session) => {
+                        dangling_session.timer_handle.abort();
+                        println!("stoped dangling session timer for");
+
+                        state.session_state = Some(dangling_session.session_state);
                         state.fsm = FSM::Initialized;
 
                         OutboundMessage::Reply {
-                            id: message_id,
+                            id,
                             data: ReplyData::Init(InitType::Reconnect),
                         }
                         .send(&state.responder);
                     }
                     None => {
-                        myself.send_message(ConnectionMessage::StopConnection {
+                        myself.send_message(ConnectionMessage::Stop {
                             reason: ConnectionStopReason::BadSessionIdProvided,
                         })?;
                     }
                 };
             }
 
-            // Initialized
+            // WaitingForInitialization; InitTimeout
+            (FSM::WaitingForInitialization { timer_handle: _ }, ConnectionMessage::InitTimeout) => {
+                myself.send_message(ConnectionMessage::Stop {
+                    reason: ConnectionStopReason::InitTimeout,
+                })?;
+            }
+
+            // Initialized; InboundMessageReceived (GetStateString)
             (
                 FSM::Initialized,
                 ConnectionMessage::InboundMessageReceived {
@@ -193,6 +208,8 @@ impl Actor for ConnectionActor {
                 }
                 .send(&state.responder);
             }
+
+            // Initialized; InboundMessageReceived (SetStateString)
             (
                 FSM::Initialized,
                 ConnectionMessage::InboundMessageReceived {
@@ -216,16 +233,16 @@ impl Actor for ConnectionActor {
 
             // Any state; MalformedInboundMessageReceived
             (_, ConnectionMessage::MalformedInboundMessageReceived) => {
-                myself.send_message(ConnectionMessage::StopConnection {
+                myself.send_message(ConnectionMessage::Stop {
                     reason: ConnectionStopReason::MalformedMessage,
                 })?;
             }
 
             // Any state; Stop
-            (_, ConnectionMessage::StopConnection { reason }) => {
+            (_, ConnectionMessage::Stop { reason }) => {
                 state
                     .server_actor
-                    .send_message(ServerMessage::StopConnectionResult {
+                    .send_message(ServerMessage::StopConnection {
                         connection_actor: myself,
                         session_state: state.session_state.clone(),
                         responder: state.responder.clone(),

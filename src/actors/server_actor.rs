@@ -5,7 +5,10 @@ use crate::{
     messages::outbound::OutboundMessage,
 };
 use async_trait::async_trait;
-use ractor::{concurrency::JoinHandle, Actor, ActorProcessingErr, ActorRef, Message, MessagingErr};
+use ractor::{
+    concurrency::JoinHandle, Actor, ActorProcessingErr, ActorRef, Message, MessagingErr,
+    RpcReplyPort,
+};
 use simple_websockets::{Message as WebSocketMessage, Responder};
 use std::{collections::HashMap, time::Duration};
 
@@ -18,8 +21,8 @@ pub struct Client {
 
 #[derive(Debug)]
 pub struct DanglingSession {
-    timer_handler: JoinHandle<Result<(), MessagingErr>>,
-    session_state: SessionState,
+    pub timer_handle: JoinHandle<Result<(), MessagingErr>>,
+    pub session_state: SessionState,
 }
 
 #[derive(Debug)]
@@ -49,16 +52,15 @@ pub enum ServerMessage {
         client_id: u64,
         message: WebSocketMessage,
     },
-    StopConnectionResult {
+    StopConnection {
         connection_actor: ActorRef<ConnectionActor>,
         session_state: Option<SessionState>,
         responder: Responder,
         reason: ConnectionStopReason,
     },
     GetDanglingSession {
-        connection_actor: ActorRef<ConnectionActor>,
         session_id: String,
-        message_id: String,
+        reply_port: RpcReplyPort<Option<DanglingSession>>,
     },
     RemoveDanglingSession {
         session_id: String,
@@ -113,7 +115,7 @@ impl Actor for ServerActor {
                 if let Some(client) = state.clients.get(&client_id) {
                     client
                         .connection_actor
-                        .send_message(ConnectionMessage::StopConnection {
+                        .send_message(ConnectionMessage::Stop {
                             reason: ConnectionStopReason::ClientDisconnect,
                         })?;
                     state.clients.remove(&client_id);
@@ -145,7 +147,7 @@ impl Actor for ServerActor {
                     },
                 )?;
             }
-            ServerMessage::StopConnectionResult {
+            ServerMessage::StopConnection {
                 connection_actor,
                 session_state,
                 responder,
@@ -178,7 +180,7 @@ impl Actor for ServerActor {
                         };
 
                         let session_id = session_state.session_id.clone();
-                        let timer_handler =
+                        let timer_handle =
                             myself.send_after(DANGLING_SESSION_TIMEOUT_MS, move || {
                                 ServerMessage::RemoveDanglingSession {
                                     session_id: session_id.clone(),
@@ -189,7 +191,7 @@ impl Actor for ServerActor {
                         state.dangling_sessions.insert(
                             session_id.clone(),
                             DanglingSession {
-                                timer_handler,
+                                timer_handle,
                                 session_state,
                             },
                         );
@@ -202,22 +204,11 @@ impl Actor for ServerActor {
                 println!("stopped connection actor");
             }
             ServerMessage::GetDanglingSession {
-                connection_actor,
                 session_id,
-                message_id,
+                reply_port,
             } => {
-                let session_state_option =
-                    state
-                        .dangling_sessions
-                        .remove(&session_id)
-                        .map(|dangling_session| {
-                            dangling_session.timer_handler.abort();
-                            dangling_session.session_state
-                        });
-                connection_actor.send_message(ConnectionMessage::GetDanglingSessionResult {
-                    session_state_option,
-                    message_id,
-                })?;
+                let dangling_session_option = state.dangling_sessions.remove(&session_id);
+                reply_port.send(dangling_session_option)?;
             }
             ServerMessage::RemoveDanglingSession { session_id } => {
                 state.dangling_sessions.remove(&session_id);
