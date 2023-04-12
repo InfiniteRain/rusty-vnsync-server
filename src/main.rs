@@ -1,8 +1,4 @@
-use crate::vnsync_server::launch;
-
-mod actors;
-mod messages;
-mod vnsync_server;
+use vnsync_server::launch;
 
 #[tokio::main]
 async fn main() {
