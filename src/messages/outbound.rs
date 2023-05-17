@@ -1,5 +1,6 @@
+use crate::{ResponderDelegate, ResponderTrait};
 use serde::Serialize;
-use simple_websockets::{Message as WebSocketMessage, Responder};
+use simple_websockets::Message as WebSocketMessage;
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "init_type")]
@@ -33,7 +34,7 @@ pub enum OutboundMessage {
 }
 
 impl OutboundMessage {
-    pub fn send(&self, responder: &Responder) {
+    pub fn send(&self, responder: &Box<dyn ResponderTrait>) {
         let message_json = serde_json::to_string(self).expect("should serialize OutboundMessage");
         responder.send(WebSocketMessage::Text(message_json));
     }

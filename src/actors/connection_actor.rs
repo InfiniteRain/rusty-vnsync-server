@@ -1,9 +1,13 @@
 use super::server_actor::{ConnectionStopReason, ServerActor, ServerMessage};
-use crate::messages::{
-    inbound::{InboundMessage, InitMessage, MessageBody},
-    outbound::{InitType, OutboundMessage, ReplyData},
+use crate::{
+    messages::{
+        inbound::{InboundMessage, InitMessage, MessageBody},
+        outbound::{InitType, OutboundMessage, ReplyData},
+    },
+    ResponderDelegate, ResponderTrait,
 };
 use async_trait::async_trait;
+use mockall::mock;
 use nanoid::nanoid;
 use ractor::{
     call, concurrency::JoinHandle, Actor, ActorProcessingErr, ActorRef, Message, MessagingErr,
@@ -21,7 +25,7 @@ pub struct SessionState {
 pub struct ConnectionState {
     pub server_actor: ActorRef<ServerActor>,
     pub fsm: FSM,
-    pub responder: Responder,
+    pub responder: Box<dyn ResponderTrait>,
     pub session_state: Option<SessionState>,
 }
 
@@ -50,12 +54,12 @@ pub struct ConnectionActor;
 impl Actor for ConnectionActor {
     type Msg = ConnectionMessage;
     type State = ConnectionState;
-    type Arguments = (ActorRef<ServerActor>, Responder);
+    type Arguments = (ActorRef<ServerActor>, Box<dyn ResponderTrait>);
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self>,
-        (server_actor, responder): (ActorRef<ServerActor>, Responder),
+        (server_actor, responder): (ActorRef<ServerActor>, Box<dyn ResponderTrait>),
     ) -> Result<Self::State, ActorProcessingErr> {
         let timer_handle = myself.send_after(Duration::from_millis(5000), || {
             ConnectionMessage::InitTimeout
@@ -100,7 +104,7 @@ impl Actor for ConnectionActor {
                 state.fsm = FSM::Initialized;
 
                 OutboundMessage::Reply {
-                    id: id.into(),
+                    id,
                     data: ReplyData::Init(InitType::Host {
                         session_id,
                         room_id,
@@ -132,7 +136,7 @@ impl Actor for ConnectionActor {
                 state.fsm = FSM::Initialized;
 
                 OutboundMessage::Reply {
-                    id: id.into(),
+                    id,
                     data: ReplyData::Init(InitType::Client { session_id }),
                 }
                 .send(&state.responder);
@@ -209,7 +213,7 @@ impl Actor for ConnectionActor {
                 .send(&state.responder);
             }
 
-            // Initialized; InboundMessageReceived (SetStateString)
+            // Initialized; InboundMessageReceived ()
             (
                 FSM::Initialized,
                 ConnectionMessage::InboundMessageReceived {
@@ -245,7 +249,7 @@ impl Actor for ConnectionActor {
                     .send_message(ServerMessage::StopConnection {
                         connection_actor: myself,
                         session_state: state.session_state.clone(),
-                        responder: state.responder.clone(),
+                        responder: dyn_clone::clone_box(&*state.responder),
                         reason,
                     })?;
             }
@@ -255,5 +259,31 @@ impl Actor for ConnectionActor {
         };
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mock! {
+    #[derive(Debug)]
+    pub ConnectionActor {}
+
+    #[async_trait]
+    impl Actor for ConnectionActor {
+        type Msg = ConnectionMessage;
+        type State = ConnectionState;
+        type Arguments = (ActorRef<ServerActor>, Box<dyn ResponderTrait>);
+
+        async fn pre_start(
+            &self,
+            myself: ActorRef<Self>,
+            args: (ActorRef<ServerActor>, Box<dyn ResponderTrait>)
+        ) -> Result<ConnectionState, ActorProcessingErr>;
+
+        async fn handle(
+            &self,
+            myself: ActorRef<Self>,
+            message: ConnectionMessage,
+            state: &mut ConnectionState,
+        ) -> Result<(), ActorProcessingErr>;
     }
 }

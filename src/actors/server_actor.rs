@@ -3,18 +3,20 @@ use crate::{
     actors::connection_actor::{ConnectionActor, ConnectionMessage},
     messages::inbound::InboundMessage,
     messages::outbound::OutboundMessage,
+    ResponderDelegate, ResponderTrait,
 };
 use async_trait::async_trait;
+use mockall::mock;
 use ractor::{
     concurrency::JoinHandle, Actor, ActorProcessingErr, ActorRef, Message, MessagingErr,
     RpcReplyPort,
 };
-use simple_websockets::{Message as WebSocketMessage, Responder};
+use simple_websockets::Message as WebSocketMessage;
 use std::{collections::HashMap, time::Duration};
 
 const DANGLING_SESSION_TIMEOUT_MS: Duration = Duration::from_secs(60);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Client {
     pub connection_actor: ActorRef<ConnectionActor>,
 }
@@ -27,8 +29,15 @@ pub struct DanglingSession {
 
 #[derive(Debug)]
 pub struct ServerState {
-    clients: HashMap<u64, Client>,
-    dangling_sessions: HashMap<String, DanglingSession>,
+    pub clients: HashMap<u64, Client>,
+    pub dangling_sessions: HashMap<String, DanglingSession>,
+}
+
+#[derive(Debug)]
+#[cfg(test)]
+pub struct ServerStateSnapshot {
+    pub clients: HashMap<u64, Client>,
+    pub dangling_sessions: HashMap<String, SessionState>,
 }
 
 #[derive(Debug)]
@@ -43,7 +52,7 @@ pub enum ConnectionStopReason {
 pub enum ServerMessage {
     Connect {
         client_id: u64,
-        responder: Responder,
+        responder: Box<dyn ResponderTrait>,
     },
     Disconnect {
         client_id: u64,
@@ -55,7 +64,7 @@ pub enum ServerMessage {
     StopConnection {
         connection_actor: ActorRef<ConnectionActor>,
         session_state: Option<SessionState>,
-        responder: Responder,
+        responder: Box<dyn ResponderTrait>,
         reason: ConnectionStopReason,
     },
     GetDanglingSession {
@@ -64,6 +73,10 @@ pub enum ServerMessage {
     },
     RemoveDanglingSession {
         session_id: String,
+    },
+    #[cfg(test)]
+    GetStateSnapshot {
+        reply_port: RpcReplyPort<ServerStateSnapshot>,
     },
 }
 
@@ -214,8 +227,98 @@ impl Actor for ServerActor {
                 state.dangling_sessions.remove(&session_id);
                 println!("Session {} removed", &session_id);
             }
+            #[cfg(test)]
+            ServerMessage::GetStateSnapshot { reply_port } => {
+                let result = reply_port.send(ServerStateSnapshot {
+                    clients: state.clients.clone(),
+                    dangling_sessions: state
+                        .dangling_sessions
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.session_state.clone()))
+                        .collect(),
+                });
+                println!("result: {:?}", result);
+            }
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mockall_double::double;
+
+    #[double]
+    use crate::ResponderDelegate;
+
+    use super::*;
+    use ractor::call;
+
+    #[tokio::test]
+    async fn connect_should_add_client_to_hashmap() {
+        let (mock_responder, actor) = start_actor().await;
+        let state = actor.get_state_snapshot().await;
+
+        assert_eq!(state.clients.len(), 0);
+
+        actor
+            .send_message(ServerMessage::Connect {
+                client_id: 0,
+                responder: Box::new(mock_responder),
+            })
+            .unwrap();
+        let state = actor.get_state_snapshot().await;
+
+        assert_eq!(state.clients.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn disconnect_should_remove_client_from_hashmap() {
+        let (mock_responder, actor) = start_actor().await;
+
+        actor
+            .send_message(ServerMessage::Connect {
+                client_id: 0,
+                responder: Box::new(mock_responder),
+            })
+            .unwrap();
+        let state = actor.get_state_snapshot().await;
+
+        assert_eq!(state.clients.len(), 1);
+
+        actor
+            .send_message(ServerMessage::Disconnect { client_id: 0 })
+            .unwrap();
+        let state = actor.get_state_snapshot().await;
+
+        assert_eq!(state.clients.len(), 0);
+    }
+
+    // #[tokio::test]
+    // async fn binary_message_should
+
+    async fn start_actor() -> (ResponderDelegate, ActorRef<ServerActor>) {
+        let mock_responder = ResponderDelegate::new();
+        let (actor, _) = Actor::spawn(None, ServerActor, ())
+            .await
+            .expect("failed to start server actor");
+
+        (mock_responder, actor)
+    }
+
+    #[async_trait]
+    trait Snapshottable {
+        async fn get_state_snapshot(&self) -> ServerStateSnapshot;
+    }
+
+    #[async_trait]
+    impl Snapshottable for ActorRef<ServerActor> {
+        async fn get_state_snapshot(&self) -> ServerStateSnapshot {
+            call!(self, |reply_port| ServerMessage::GetStateSnapshot {
+                reply_port
+            })
+            .unwrap()
+        }
     }
 }
